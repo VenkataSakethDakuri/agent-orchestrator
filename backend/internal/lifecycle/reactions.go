@@ -157,13 +157,7 @@ func (m *Manager) ApplyPRObservation(ctx context.Context, id domain.SessionID, o
 	if rec.IsTerminated || rec.Activity.State == domain.ActivityWaitingInput {
 		return nil
 	}
-	// A single PR can trip several actionable conditions at once (failing CI,
-	// unresolved review comments, a merge conflict). Queue every applicable nudge
-	// and send them together, so each surfaces independently instead of one
-	// returning early and hiding the rest — the bug this reducer had, where a CI
-	// failure suppressed review feedback on the same PR. Each nudge self-dedups
-	// via sendOnce; a send error short-circuits, and nudges already sent have
-	// persisted their own dedup signature so the next poll retries only the rest.
+	// Queue every applicable nudge so one PR condition cannot hide another.
 	var nudges []pendingNudge
 
 	if o.CI == domain.CIFailing {
