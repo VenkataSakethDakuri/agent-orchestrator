@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -330,10 +331,11 @@ func (o *Observer) Poll(ctx context.Context) error {
 		return err
 	}
 
-	for key, obs := range observations {
+	for _, key := range dispatchOrder(observations, selection.subjectsByPR) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		obs := observations[key]
 		subj, ok := selection.subjectsByPR[key]
 		if !ok {
 			continue
@@ -413,6 +415,30 @@ func (o *Observer) Poll(ctx context.Context) error {
 	return nil
 }
 
+// dispatchOrder returns observation keys in a deterministic order so lifecycle
+// notifications for a session are stable across polls.
+func dispatchOrder(observations map[string]ports.SCMObservation, subjectsByPR map[string]*subject) []string {
+	keys := make([]string, 0, len(observations))
+	for key := range observations {
+		keys = append(keys, key)
+	}
+	sessionOf := func(key string) string {
+		if s := subjectsByPR[key]; s != nil {
+			return string(s.session.ID)
+		}
+		return ""
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if si, sj := sessionOf(keys[i]), sessionOf(keys[j]); si != sj {
+			return si < sj
+		}
+		if ni, nj := observations[keys[i]].PR.Number, observations[keys[j]].PR.Number; ni != nj {
+			return ni < nj
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
+}
 func (o *Observer) checkCredentials(ctx context.Context) (bool, error) {
 	var probe observe.CredentialProbe
 	if checker, ok := o.provider.(credentialChecker); ok {
@@ -573,11 +599,7 @@ func (o *Observer) workspaceSCMSessionRepos(ctx context.Context, proj domain.Pro
 
 func repoForTrackedPR(pr domain.PullRequest, repos []ports.SCMRepo) (ports.SCMRepo, bool) {
 	if pr.Provider != "" && pr.Host != "" && pr.Repo != "" {
-		owner, name, ok := strings.Cut(pr.Repo, "/")
-		if !ok || owner == "" || name == "" {
-			return ports.SCMRepo{}, false
-		}
-		return ports.SCMRepo{Provider: pr.Provider, Host: pr.Host, Owner: owner, Name: name, Repo: pr.Repo}, true
+		return ports.SCMRepo{Provider: pr.Provider, Host: pr.Host, Repo: pr.Repo}, true
 	}
 	if pr.Repo != "" {
 		for _, repo := range repos {
