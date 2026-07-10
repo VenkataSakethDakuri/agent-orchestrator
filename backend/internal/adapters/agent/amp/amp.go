@@ -50,12 +50,15 @@ func (p *Plugin) Manifest() adapters.Manifest {
 
 // GetLaunchCommand builds the argv to start a new interactive Amp session:
 //
-//	amp [--permission-mode <mode>] [-- <prompt>]
+//	amp [-- <prompt>]
 //
 // The prompt is passed after `--` so a prompt beginning with "-" is not
-// mistaken for a flag. Amp has no documented system-prompt flag, so
-// SystemPrompt and SystemPromptFile are intentionally ignored until Amp exposes
-// a supported instruction mechanism.
+// mistaken for a flag. Amp has no documented --permission-mode flag: it runs
+// tools without approval by default and configures permissions via settings and
+// the Plugin API, not CLI flags. So cfg.Permissions is intentionally not
+// translated to argv (a non-default mode would otherwise emit a flag Amp
+// rejects at startup). SystemPrompt and SystemPromptFile are likewise ignored
+// until Amp exposes a supported instruction mechanism.
 func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (cmd []string, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -66,7 +69,6 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 	}
 
 	cmd = []string{binary}
-	appendPermissionFlags(&cmd, cfg.Permissions)
 	if cfg.Prompt != "" {
 		cmd = append(cmd, "--", cfg.Prompt)
 	}
@@ -89,23 +91,10 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 	if err != nil {
 		return nil, false, err
 	}
-	// Capacity fits binary + up to two permission flags + --resume + sessionID.
-	cmd = make([]string, 0, 5)
-	cmd = append(cmd, binary)
-	appendPermissionFlags(&cmd, cfg.Permissions)
-	cmd = append(cmd, "--resume", agentSessionID)
+	// Capacity fits binary + --resume + sessionID.
+	cmd = make([]string, 0, 3)
+	cmd = append(cmd, binary, "--resume", agentSessionID)
 	return cmd, true, nil
-}
-
-func appendPermissionFlags(cmd *[]string, mode ports.PermissionMode) {
-	switch mode {
-	case ports.PermissionModeAcceptEdits:
-		*cmd = append(*cmd, "--permission-mode", "acceptEdits")
-	case ports.PermissionModeAuto:
-		*cmd = append(*cmd, "--permission-mode", "auto")
-	case ports.PermissionModeBypassPermissions:
-		*cmd = append(*cmd, "--permission-mode", "bypassPermissions")
-	}
 }
 
 var ampBinarySpec = binaryutil.BinarySpec{
