@@ -44,24 +44,36 @@ func TestGetPromptDeliveryStrategy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if s != ports.PromptDeliveryInCommand {
-		t.Fatalf("strategy = %q, want %q", s, ports.PromptDeliveryInCommand)
+	if s != ports.PromptDeliveryAfterStart {
+		t.Fatalf("strategy = %q, want %q", s, ports.PromptDeliveryAfterStart)
 	}
 }
 
-func TestGetLaunchCommandPromptAfterSeparator(t *testing.T) {
+func TestPromptReadinessHints(t *testing.T) {
+	hints, err := (&Plugin{}).PromptReadinessHints(context.Background(), ports.LaunchConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hints.Timeout <= 0 || len(hints.Patterns) == 0 {
+		t.Fatalf("hints = %#v, want bounded readiness patterns", hints)
+	}
+}
+
+func TestGetLaunchCommandBypassWithPromptLeavesPromptForAfterStartDelivery(t *testing.T) {
 	p := &Plugin{resolvedBinary: "amp"}
 	cmd, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
-		Prompt: "-add a health check",
+		Permissions: ports.PermissionModeBypassPermissions,
+		Prompt:      "-add a health check",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	want := []string{"amp", "--", "-add a health check"}
+	want := []string{"amp"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("unexpected command\nwant: %#v\n got: %#v", want, cmd)
 	}
+	assertAmpPermissionFlagsAbsent(t, cmd)
 }
 
 func TestGetLaunchCommandPermissionModesEmitNoFlag(t *testing.T) {
@@ -99,7 +111,7 @@ func TestGetLaunchCommandIgnoresInlineSystemPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"amp", "--", "do the thing"}
+	want := []string{"amp"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -209,6 +221,9 @@ func TestContextCancellation(t *testing.T) {
 	}
 	if _, err := (&Plugin{}).GetPromptDeliveryStrategy(ctx, ports.LaunchConfig{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("GetPromptDeliveryStrategy err = %v, want context.Canceled", err)
+	}
+	if _, err := (&Plugin{}).PromptReadinessHints(ctx, ports.LaunchConfig{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("PromptReadinessHints err = %v, want context.Canceled", err)
 	}
 	if err := (&Plugin{}).GetAgentHooks(ctx, ports.WorkspaceHookConfig{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("GetAgentHooks err = %v, want context.Canceled", err)
