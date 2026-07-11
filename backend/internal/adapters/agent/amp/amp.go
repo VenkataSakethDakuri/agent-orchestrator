@@ -57,8 +57,9 @@ func (p *Plugin) Manifest() adapters.Manifest {
 // Amp opens its normal interactive TUI instead of an execute-mode transcript.
 // Amp has no documented --permission-mode flag: it runs tools without approval
 // by default and configures permissions via settings and the Plugin API, not
-// CLI flags. So cfg.Permissions is intentionally not translated to argv (a
-// non-default mode would otherwise emit a flag Amp rejects at startup).
+// CLI flags. So cfg.Permissions is intentionally not translated to argv because
+// Amp does not document that flag, and relying on hidden or permissively parsed
+// options would make launches version-fragile.
 // SystemPrompt and SystemPromptFile are likewise ignored until Amp exposes a
 // supported instruction mechanism.
 func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (cmd []string, err error) {
