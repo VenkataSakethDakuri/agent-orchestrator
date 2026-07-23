@@ -1,10 +1,11 @@
-import { Check, Cloud, FolderGit2, KeyRound } from "lucide-react";
+import { Check, Cloud, FolderGit2, KeyRound, LoaderCircle } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";
+import type { CloudWorkspaceConnection, CloudWorkspaceProgress } from "../../shared/cloud";
+import { aoBridge } from "../lib/bridge";
+import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
-import { cn } from "../lib/utils";
-import { aoBridge } from "../lib/bridge";
 
 type SetupStep = "daytona" | "repository" | "github" | "codex";
 
@@ -34,13 +35,22 @@ export function normalizeGitHubRepository(input: string): string | null {
 	return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value) ? value : null;
 }
 
-export function CloudWorkspaceSetup({ resetSignal = 0 }: { resetSignal?: number }) {
+export function CloudWorkspaceSetup({
+	resetSignal = 0,
+	onConnected = () => undefined,
+}: {
+	resetSignal?: number;
+	onConnected?: (connection: CloudWorkspaceConnection) => void;
+}) {
 	const [step, setStep] = useState<SetupStep>("daytona");
 	const [daytonaApiKey, setDaytonaApiKey] = useState("");
 	const [repository, setRepository] = useState("");
 	const [githubPat, setGithubPat] = useState("");
 	const [error, setError] = useState<string | null>(null);
-	const [isValidating, setIsValidating] = useState(false);
+	const [isWorking, setIsWorking] = useState(false);
+	const [progress, setProgress] = useState<CloudWorkspaceProgress | null>(null);
+
+	useEffect(() => aoBridge.cloud.onProgress(setProgress), []);
 
 	useEffect(() => {
 		setStep("daytona");
@@ -48,7 +58,8 @@ export function CloudWorkspaceSetup({ resetSignal = 0 }: { resetSignal?: number 
 		setRepository("");
 		setGithubPat("");
 		setError(null);
-		setIsValidating(false);
+		setIsWorking(false);
+		setProgress(null);
 	}, [resetSignal]);
 
 	const currentIndex = steps.findIndex((item) => item.id === step);
@@ -62,7 +73,7 @@ export function CloudWorkspaceSetup({ resetSignal = 0 }: { resetSignal?: number 
 				setError("Enter a Daytona API key.");
 				return;
 			}
-			setIsValidating(true);
+			setIsWorking(true);
 			try {
 				const result = await aoBridge.cloud.validateDaytonaKey(daytonaApiKey);
 				if (!result.ok) {
@@ -78,7 +89,7 @@ export function CloudWorkspaceSetup({ resetSignal = 0 }: { resetSignal?: number 
 						: "Could not validate the Daytona API key.",
 				);
 			} finally {
-				setIsValidating(false);
+				setIsWorking(false);
 			}
 			return;
 		}
@@ -94,13 +105,27 @@ export function CloudWorkspaceSetup({ resetSignal = 0 }: { resetSignal?: number 
 			return;
 		}
 
-		if (step === "github") {
-			if (!githubPat.trim()) {
-				setError("Enter a GitHub personal access token.");
+		if (!githubPat.trim()) {
+			setError("Enter a GitHub personal access token.");
+			return;
+		}
+
+		setStep("codex");
+		setIsWorking(true);
+		setProgress({ state: "preparing", message: "Validating GitHub access." });
+		const request = aoBridge.cloud.provisionWorkspace({ repository, githubPat });
+		setGithubPat("");
+		try {
+			const result = await request;
+			if (!result.ok) {
+				setError(result.error);
 				return;
 			}
-			setGithubPat("");
-			setStep("codex");
+			onConnected(result.connection);
+		} catch (provisionError) {
+			setError(provisionError instanceof Error ? provisionError.message : "Could not create the cloud workspace.");
+		} finally {
+			setIsWorking(false);
 		}
 	}
 
@@ -147,14 +172,26 @@ export function CloudWorkspaceSetup({ resetSignal = 0 }: { resetSignal?: number 
 
 				{step === "codex" ? (
 					<div className="rounded-lg border border-border bg-surface p-5">
-						<h2 className="text-base font-semibold text-foreground">Codex login is next</h2>
+						<div className="flex items-center gap-2">
+							{isWorking ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin text-accent" /> : null}
+							<h2 className="text-base font-semibold text-foreground">
+								{progress?.state === "waiting_for_codex" ? "Approve Codex login" : "Creating cloud workspace"}
+							</h2>
+						</div>
 						<p className="mt-2 text-sm leading-6 text-passive">
-							The setup screen is ready. The next implementation section will validate each input in Electron
-							main, create or reuse the sandbox, and display the Codex device code.
+							{progress?.message ?? "Electron is preparing Daytona."}
 						</p>
-						<Button className="mt-4" onClick={() => setStep("daytona")} type="button" variant="outline">
-							Start over
-						</Button>
+						{progress?.state === "waiting_for_codex" && progress.codexOutput ? (
+							<pre className="mt-4 max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-background p-3 text-xs text-foreground">
+								{progress.codexOutput}
+							</pre>
+						) : null}
+						{error ? <p className="mt-3 text-sm text-destructive">{error}</p> : null}
+						{!isWorking ? (
+							<Button className="mt-4" onClick={() => setStep("daytona")} type="button" variant="outline">
+								Start over
+							</Button>
+						) : null}
 					</div>
 				) : (
 					<form onSubmit={submit}>
@@ -163,7 +200,7 @@ export function CloudWorkspaceSetup({ resetSignal = 0 }: { resetSignal?: number 
 								autoComplete="off"
 								description="Used by Electron to create or reuse your sandbox. It is never sent into the sandbox."
 								label="Daytona API key"
-								disabled={isValidating}
+								disabled={isWorking}
 								onChange={setDaytonaApiKey}
 								placeholder="dtn_..."
 								type="password"
@@ -202,8 +239,8 @@ export function CloudWorkspaceSetup({ resetSignal = 0 }: { resetSignal?: number 
 									Back
 								</Button>
 							)}
-							<Button disabled={isValidating} type="submit">
-								{isValidating ? "Validating..." : step === "github" ? "Continue to Codex login" : "Continue"}
+							<Button disabled={isWorking} type="submit">
+								{isWorking ? "Validating..." : step === "github" ? "Create cloud workspace" : "Continue"}
 							</Button>
 						</div>
 					</form>

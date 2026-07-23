@@ -92,9 +92,11 @@ type SidebarProps = {
 	onCreateProject: (input: CreateProjectInput) => Promise<void>;
 	onInitializeProject: (path: string) => Promise<void>;
 	onRemoveProject: (projectId: string) => Promise<void>;
+	cloudWorkspaces?: Array<{ id: string; repository: string }>;
 	mode?: WorkspaceMode;
 	onModeChange?: (mode: WorkspaceMode) => void;
 	onNewCloudWorkspace?: () => void;
+	onSelectCloudWorkspace?: (workspaceId: string) => void;
 };
 
 // Selection state comes from the URL: which project/session is active is the
@@ -136,9 +138,11 @@ export function Sidebar({
 	onCreateProject,
 	onInitializeProject,
 	onRemoveProject,
+	cloudWorkspaces = [],
 	mode = "local",
 	onModeChange = () => undefined,
 	onNewCloudWorkspace = () => undefined,
+	onSelectCloudWorkspace = () => undefined,
 }: SidebarProps) {
 	const selection = useSelection();
 	const { state, setOpen } = useSidebar();
@@ -282,7 +286,11 @@ export function Sidebar({
 			</SidebarHeader>
 
 			{mode === "cloud" ? (
-				<CloudWorkspaceSidebar onNewWorkspace={onNewCloudWorkspace} />
+				<CloudWorkspaceSidebar
+					onNewWorkspace={onNewCloudWorkspace}
+					onSelectWorkspace={onSelectCloudWorkspace}
+					workspaces={cloudWorkspaces}
+				/>
 			) : (
 			<SidebarContent className="gap-0 pl-2.5 pr-1.75 group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:px-1.5">
 				<SidebarGroup className="p-0">

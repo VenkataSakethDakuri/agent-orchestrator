@@ -18,8 +18,8 @@ import { agentsQueryKey, agentsQueryOptions, refreshAgents } from "../hooks/useA
 import { useDaemonStatus } from "../hooks/useDaemonStatus";
 import { useOpenShellTerminal } from "../hooks/useShellTerminals";
 import { useWorkspaceQuery, workspaceQueryKey, workspaceQueryOptions } from "../hooks/useWorkspaceQuery";
-import { apiClient, apiErrorCode, apiErrorMessage } from "../lib/api-client";
-import { refreshDaemonStatus } from "../lib/daemon-status";
+import { apiClient, apiErrorCode, apiErrorMessage, setApiBaseUrl } from "../lib/api-client";
+import { applyDaemonStatus, refreshDaemonStatus } from "../lib/daemon-status";
 import { addRendererExceptionStep, captureRendererEvent, captureRendererException } from "../lib/telemetry";
 import { ShellProvider } from "../lib/shell-context";
 import { restartProjectOrchestrator } from "../lib/restart-orchestrator";
@@ -30,6 +30,7 @@ import { isLinuxPlatform, isMacPlatform, isWindowsPlatform, usesFramedAppTopbar 
 import { useUiStore } from "../stores/ui-store";
 import type { WorkspaceSummary } from "../types/workspace";
 import type { components } from "../../api/schema";
+import type { CloudWorkspaceConnection } from "../../shared/cloud";
 
 export const Route = createFileRoute("/_shell")({
 	// Prefetch the workspace list for the whole shell (parent loaders run before
@@ -73,9 +74,12 @@ function ShellLayout() {
 	const navigate = useNavigate();
 	const matchRoute = useMatchRoute();
 	const queryClient = useQueryClient();
+	const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("local");
+	const [cloudConnection, setCloudConnection] = useState<CloudWorkspaceConnection | null>(null);
+	const [cloudSetupNonce, setCloudSetupNonce] = useState(0);
 	const workspaceQuery = useWorkspaceQuery();
 	const workspaces = workspaceQuery.data ?? [];
-	const daemonStatus = useDaemonStatus(queryClient);
+	const daemonStatus = useDaemonStatus(queryClient, workspaceMode === "local");
 	const agentCatalogPortRef = useRef<number | undefined>(undefined);
 	const { themePreference, resolvedTheme, isSidebarOpen, toggleSidebar } = useUiStore();
 	const syncSystemTheme = useUiStore((state) => state.syncSystemTheme);
@@ -84,8 +88,6 @@ function ShellLayout() {
 	const requestNewShellTerminal = useUiStore((state) => state.requestNewShellTerminal);
 	const newShellTerminalNonce = useUiStore((state) => state.newShellTerminalNonce);
 	const setActiveShellTerminal = useUiStore((state) => state.setActiveShellTerminal);
-	const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("local");
-	const [cloudSetupNonce, setCloudSetupNonce] = useState(0);
 	const openShellTerminal = useOpenShellTerminal();
 	// Seeded to the current value so a mount never opens a terminal unasked.
 	const handledShellNonceRef = useRef(newShellTerminalNonce);
@@ -113,6 +115,41 @@ function ShellLayout() {
 	const setOrchestratorReplacementError = useUiStore((state) => state.setOrchestratorReplacementError);
 	const setOrchestratorStartupError = useUiStore((state) => state.setOrchestratorStartupError);
 	const replacementErrorProjectId = Object.keys(orchestratorReplacementErrors)[0] ?? null;
+
+	const changeWorkspaceMode = useCallback(
+		(nextMode: WorkspaceMode) => {
+			setWorkspaceMode(nextMode);
+			if (nextMode === "local") {
+				applyDaemonStatus(daemonStatus);
+			} else {
+				setApiBaseUrl(cloudConnection?.apiBaseUrl ?? null);
+			}
+			void queryClient.resetQueries();
+			void navigate({ to: "/" });
+		},
+		[cloudConnection, daemonStatus, navigate, queryClient],
+	);
+
+	const connectCloudWorkspace = useCallback(
+		(connection: CloudWorkspaceConnection) => {
+			setCloudConnection(connection);
+			setApiBaseUrl(connection.apiBaseUrl);
+			void queryClient.resetQueries();
+			void navigate({
+				to: "/projects/$projectId",
+				params: { projectId: connection.projectId },
+			});
+		},
+		[navigate, queryClient],
+	);
+
+	const createCloudWorkspace = useCallback(() => {
+		setWorkspaceMode("cloud");
+		setCloudConnection(null);
+		setApiBaseUrl(null);
+		void queryClient.resetQueries();
+		setCloudSetupNonce((nonce) => nonce + 1);
+	}, [queryClient]);
 
 	const updateWorkspaces = useCallback(
 		(updater: (workspaces: WorkspaceSummary[]) => WorkspaceSummary[]) => {
@@ -408,13 +445,14 @@ function ShellLayout() {
 				>
 					{/* Hang the fixed sidebar below shell chrome. macOS keeps room for the traffic-light/titlebar controls; Windows clears only its custom titlebar because the app topbar is inside the framed panel. When the topbar lives inside the framed panel (framedAppTopbar), Linux reserves no offset — otherwise the sidebar would clear a full-width topbar that isn't there. */}
 					<Sidebar
+						cloudWorkspaces={cloudConnection ? [{ id: cloudConnection.projectId, repository: cloudConnection.repository }] : []}
 						hideEdgeBorder={isWelcomeBoard}
 						mode={workspaceMode}
-						onModeChange={setWorkspaceMode}
-						onNewCloudWorkspace={() => {
-							setWorkspaceMode("cloud");
-							setCloudSetupNonce((nonce) => nonce + 1);
-						}}
+						onModeChange={changeWorkspaceMode}
+						onNewCloudWorkspace={createCloudWorkspace}
+						onSelectCloudWorkspace={(workspaceId) =>
+							void navigate({ to: "/projects/$projectId", params: { projectId: workspaceId } })
+						}
 						underTopbar={
 							isMac || isWindows || (!framedAppTopbar && !hideShellTopbar && (isLinux ? isSessionRoute : true))
 						}
@@ -430,7 +468,16 @@ function ShellLayout() {
 							{/* Board/session routes render inside the same inset box the welcome board and settings paint for themselves, so every screen sits within the app's outer boundary. */}
 							{workspaceMode === "cloud" ? (
 								<CenterPanelShell className={isMac ? "center-panel-shell--mac" : undefined} variant="app">
-									<CloudWorkspaceSetup resetSignal={cloudSetupNonce} />
+									{cloudConnection ? (
+										<>
+											<ShellTopbar />
+											<div className="flex min-h-0 flex-1 flex-col">
+												<Outlet />
+											</div>
+										</>
+									) : (
+										<CloudWorkspaceSetup onConnected={connectCloudWorkspace} resetSignal={cloudSetupNonce} />
+									)}
 								</CenterPanelShell>
 							) : hideShellTopbar ? (
 								<Outlet />

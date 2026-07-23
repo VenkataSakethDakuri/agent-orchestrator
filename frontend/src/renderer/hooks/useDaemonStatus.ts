@@ -8,7 +8,7 @@ import { createEventTransport } from "../lib/event-transport";
 const STATUS_REFRESH_MS = 2_000;
 const READY_STATUS_REFRESH_MS = 10_000;
 
-export function useDaemonStatus(queryClient: QueryClient = defaultQueryClient) {
+export function useDaemonStatus(queryClient: QueryClient = defaultQueryClient, bindApiBaseUrl = true) {
 	const [status, setStatus] = useState<DaemonStatus>({ state: "stopped" });
 	const statusRef = useRef(status);
 
@@ -52,11 +52,11 @@ export function useDaemonStatus(queryClient: QueryClient = defaultQueryClient) {
 			// transport's job (it invalidates, debounced, on every daemon status).
 			statusRef.current = nextStatus;
 			if (nextStatus.state === "ready" && nextStatus.port) {
-				applyDaemonStatus(nextStatus);
+				if (bindApiBaseUrl) applyDaemonStatus(nextStatus);
 				clearRefresh();
 				scheduleRefresh(READY_STATUS_REFRESH_MS);
 			} else {
-				applyDaemonStatus(nextStatus);
+				if (bindApiBaseUrl) applyDaemonStatus(nextStatus);
 				scheduleRefresh();
 			}
 			setStatus(nextStatus);
@@ -89,7 +89,7 @@ export function useDaemonStatus(queryClient: QueryClient = defaultQueryClient) {
 			stopTransport();
 			stopStatusListener();
 		};
-	}, [queryClient]);
+	}, [bindApiBaseUrl, queryClient]);
 
 	return status;
 }

@@ -5,6 +5,16 @@ import { CloudWorkspaceSetup, normalizeGitHubRepository } from "./CloudWorkspace
 
 beforeEach(() => {
 	window.ao!.cloud.validateDaytonaKey = vi.fn().mockResolvedValue({ ok: true });
+	window.ao!.cloud.provisionWorkspace = vi.fn().mockImplementation(async ({ repository }) => ({
+		ok: true,
+		connection: {
+			repository,
+			projectId: "cloud-preview",
+			sandboxId: "sandbox-1",
+			apiBaseUrl: "https://3001-preview.proxy.daytona.work",
+			expiresAt: "2026-07-23T12:00:00.000Z",
+		},
+	}));
 });
 
 describe("CloudWorkspaceSetup", () => {
@@ -25,9 +35,12 @@ describe("CloudWorkspaceSetup", () => {
 
 		expect(screen.getByText(/acme\/widget/)).toBeInTheDocument();
 		await user.type(screen.getByLabelText("GitHub personal access token"), "github_pat_test");
-		await user.click(screen.getByRole("button", { name: "Continue to Codex login" }));
+		await user.click(screen.getByRole("button", { name: "Create cloud workspace" }));
 
-		expect(screen.getByRole("heading", { name: "Codex login is next" })).toBeInTheDocument();
+		expect(window.ao!.cloud.provisionWorkspace).toHaveBeenCalledWith({
+			repository: "acme/widget",
+			githubPat: "github_pat_test",
+		});
 		expect(screen.queryByLabelText("GitHub personal access token")).not.toBeInTheDocument();
 		expect(screen.queryByLabelText(/git author/i)).not.toBeInTheDocument();
 	});

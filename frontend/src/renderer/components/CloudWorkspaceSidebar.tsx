@@ -17,9 +17,11 @@ export type CloudWorkspaceSummary = {
 export function CloudWorkspaceSidebar({
 	workspaces = [],
 	onNewWorkspace,
+	onSelectWorkspace = () => undefined,
 }: {
 	workspaces?: CloudWorkspaceSummary[];
 	onNewWorkspace: () => void;
+	onSelectWorkspace?: (workspaceId: string) => void;
 }) {
 	return (
 		<SidebarContent className="gap-0 pl-2.5 pr-1.75 group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:px-1.5">
@@ -48,7 +50,7 @@ export function CloudWorkspaceSidebar({
 						<SidebarMenu className="gap-1">
 							{workspaces.map((workspace) => (
 								<SidebarMenuItem key={workspace.id}>
-									<SidebarMenuButton tooltip={workspace.repository}>
+									<SidebarMenuButton onClick={() => onSelectWorkspace(workspace.id)} tooltip={workspace.repository}>
 										<Cloud aria-hidden="true" />
 										<span>{workspace.repository}</span>
 									</SidebarMenuButton>
