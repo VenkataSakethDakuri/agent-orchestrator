@@ -4,9 +4,11 @@ import {
 	DaytonaConnectionError,
 } from "@daytona/sdk";
 import { describe, expect, it, vi } from "vitest";
-import { DaytonaSupervisor, type DaytonaClient } from "./daytona-supervisor";
+import { DaytonaSupervisor, type DaytonaClient, type DaytonaSandbox } from "./daytona-supervisor";
 
-function iteratorThat(result: IteratorResult<unknown> = { done: true, value: undefined }): AsyncIterableIterator<unknown> {
+function iteratorThat(
+	result: IteratorResult<DaytonaSandbox> = { done: true, value: undefined },
+): AsyncIterableIterator<DaytonaSandbox> {
 	return {
 		next: vi.fn().mockResolvedValue(result),
 		return: vi.fn().mockResolvedValue({ done: true, value: undefined }),
@@ -77,5 +79,63 @@ describe("DaytonaSupervisor", () => {
 		await expect(supervisor.validateApiKey("dtn_test")).rejects.toThrow(
 			"Could not reach Daytona. Check your connection and try again.",
 		);
+	});
+	it("creates and bootstraps a workspace without putting the PAT in shell commands", async () => {
+		const executeCommand = vi.fn(async (command: string) => ({
+			exitCode: 0,
+			result: command === "codex login status" ? "Logged in" : "ok",
+		}));
+		const sandbox: DaytonaSandbox = {
+			id: "sandbox-1",
+			name: "ao-acme-widget-0357f45766",
+			state: "started",
+			process: {
+				executeCommand,
+				createPty: vi.fn(),
+			},
+			getSignedPreviewUrl: vi.fn().mockResolvedValue({
+				url: "https://3001-signed.proxy.daytona.work",
+				token: "signed",
+			}),
+		};
+		const client: DaytonaClient = {
+			list: vi.fn(() => iteratorThat()),
+			create: vi.fn().mockResolvedValue(sandbox),
+			start: vi.fn(),
+		};
+		const request = vi.fn(async (url: string | URL | Request) => {
+			const target = String(url);
+			const body = target.endsWith("/user")
+				? { login: "octo", name: null, email: null, id: 7 }
+				: target.endsWith("/readyz")
+					? { status: "ready" }
+					: {};
+			return new Response(JSON.stringify(body), { status: 200 });
+		}) as typeof fetch;
+		const image = { kind: "dockerfile" };
+		const supervisor = new DaytonaSupervisor(() => client, request, () => image);
+		const progress = vi.fn();
+
+		await supervisor.validateApiKey("dtn_test");
+		const connection = await supervisor.provisionWorkspace(
+			{ repository: "acme/widget", githubPat: "github_pat_secret" },
+			progress,
+		);
+
+		expect(client.create).toHaveBeenCalledWith(
+			expect.objectContaining({ image, resources: { cpu: 4, memory: 8, disk: 10 }, public: false }),
+			{ timeout: 1800 },
+		);
+		expect(connection).toMatchObject({
+			repository: "acme/widget",
+			sandboxId: "sandbox-1",
+			apiBaseUrl: "https://3001-signed.proxy.daytona.work",
+		});
+		expect(request).toHaveBeenCalledWith(
+			"https://3001-signed.proxy.daytona.work/readyz",
+			expect.objectContaining({ headers: { "X-Daytona-Skip-Preview-Warning": "true" } }),
+		);
+		expect(executeCommand.mock.calls.map(([command]) => command).join("\n")).not.toContain("github_pat_secret");
+		expect(progress).toHaveBeenLastCalledWith(expect.objectContaining({ state: "connected", connection }));
 	});
 });

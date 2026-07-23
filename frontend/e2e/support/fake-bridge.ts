@@ -128,6 +128,17 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 				},
 				cloud: {
 					validateDaytonaKey: async () => ({ ok: true }),
+					provisionWorkspace: async ({ repository }) => ({
+						ok: true,
+						connection: {
+							repository,
+							projectId: "cloud-preview",
+							sandboxId: "sandbox-preview",
+							apiBaseUrl: "https://3001-preview.proxy.daytona.work",
+							expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+						},
+					}),
+					onProgress: () => () => undefined,
 				},
 				// UpdatesSection calls featureBuilds.getActive() immediately on mount; an
 				// omitted namespace would surface as a swallowed React Query error.
@@ -471,6 +482,17 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 				},
 				cloud: {
 					validateDaytonaKey: async () => ({ ok: true }),
+					provisionWorkspace: async ({ repository }) => ({
+						ok: true,
+						connection: {
+							repository,
+							projectId: "cloud-preview",
+							sandboxId: "sandbox-preview",
+							apiBaseUrl: "https://3001-preview.proxy.daytona.work",
+							expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+						},
+					}),
+					onProgress: () => () => undefined,
 				},
 				// UpdatesSection calls featureBuilds.getActive() immediately on mount; an
 				// omitted namespace would surface as a swallowed React Query error.

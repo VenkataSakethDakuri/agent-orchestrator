@@ -1,5 +1,12 @@
 import { defineConfig } from "vite";
 
-// Forge's VitePlugin handles all main-process build configuration.
-// Add overrides here only if needed (e.g. custom externals or aliases).
-export default defineConfig({});
+// Keep the Daytona SDK external. Bundling its dual CJS/ESM dependency graph
+// corrupts tslib's default export in the Electron main bundle at runtime.
+// Electron can load the SDK's declared CommonJS export directly from node_modules.
+export default defineConfig({
+	build: {
+		rollupOptions: {
+			external: ["@daytona/sdk"],
+		},
+	},
+});

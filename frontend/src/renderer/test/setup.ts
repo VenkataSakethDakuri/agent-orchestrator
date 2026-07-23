@@ -89,6 +89,17 @@ if (typeof window !== "undefined") {
 		},
 		cloud: {
 			validateDaytonaKey: async () => ({ ok: true }),
+			provisionWorkspace: async ({ repository }) => ({
+				ok: true,
+				connection: {
+					repository,
+					projectId: "cloud-preview",
+					sandboxId: "sandbox-preview",
+					apiBaseUrl: "https://3001-preview.proxy.daytona.work",
+					expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+				},
+			}),
+			onProgress: () => () => undefined,
 		},
 		telemetry: {
 			getBootstrap: async () => null,

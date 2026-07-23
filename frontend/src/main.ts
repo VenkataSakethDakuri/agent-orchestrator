@@ -57,6 +57,7 @@ import { keepDaemonAlive, shouldLinkOnAttach } from "./main/daemon-owner";
 import { readMigrationState, updateMigration, writeAppStateMarker, type MigrationState } from "./main/app-state";
 import { isAllowedAppExternalURL, openAllowedAppExternalURL } from "./main/external-open";
 import { DaytonaSupervisor } from "./main/cloud/daytona-supervisor";
+import type { CloudWorkspaceProvisionInput } from "./shared/cloud";
 
 // Globals injected at compile time by @electron-forge/plugin-vite.
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
@@ -1066,6 +1067,21 @@ ipcMain.handle("cloud:validateDaytonaKey", async (_event, apiKey: unknown) => {
 			ok: false,
 			error: error instanceof Error ? error.message : "Could not validate the Daytona API key.",
 		};
+	}
+});
+ipcMain.handle("cloud:provisionWorkspace", async (event, input: CloudWorkspaceProvisionInput) => {
+	try {
+		const connection = await daytonaSupervisor.provisionWorkspace(input, (progress) => {
+			event.sender.send("cloud:progress", progress);
+		});
+		return { ok: true, connection };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : "Could not create the cloud workspace.";
+		event.sender.send("cloud:progress", {
+			state: "error",
+			message,
+		});
+		return { ok: false, error: message };
 	}
 });
 ipcMain.handle("app:getVersion", () => app.getVersion());
