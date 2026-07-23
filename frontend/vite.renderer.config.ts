@@ -56,17 +56,17 @@ export default defineConfig({
 			"@": fileURLToPath(new URL("./src/renderer", import.meta.url)),
 		},
 	},
-	// Dev proxy for VITE_NO_ELECTRON=1 browser preview — forwards /api and /mux
-	// to the daemon so the renderer can be tested against a running daemon from
-	// a plain browser without an Electron shell.
+	// Dev proxy forwards the renderer's initial /api and /mux traffic to the
+	// app-owned dev daemon. AO_DEV_API_TARGET can point a plain-browser preview
+	// at another daemon.
 	server: {
 		proxy: {
 			"/api": {
-				target: process.env.AO_DEV_API_TARGET ?? "http://127.0.0.1:3001",
+				target: process.env.AO_DEV_API_TARGET ?? "http://127.0.0.1:3002",
 				changeOrigin: false,
 			},
 			"/mux": {
-				target: process.env.AO_DEV_API_TARGET ?? "http://127.0.0.1:3001",
+				target: process.env.AO_DEV_API_TARGET ?? "http://127.0.0.1:3002",
 				changeOrigin: false,
 				ws: true,
 			},

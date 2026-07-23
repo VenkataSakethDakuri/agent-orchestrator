@@ -829,10 +829,14 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 	// on THIS process. Without this, a stale exit from an already-stopped daemon
 	// could null out a newer daemonProcess started in the meantime, orphaning it.
 	//
-	// `detached` makes the child its own process-group leader. Because shell:true
-	// runs the command through /bin/sh, a plain kill() would only signal the shell
-	// wrapper and orphan the real daemon (which keeps holding the port). Killing
-	// the whole group via killDaemon() reaches the daemon and any PTY children.
+	// On Unix, `detached` makes the child its own process-group leader. Because
+	// shell:true runs configured commands through /bin/sh, killing the whole group
+	// via killDaemon() reaches the daemon and any PTY children.
+	//
+	// Do not detach `go run` on Windows. A detached console process launched from
+	// Electron can receive CTRL_C_EVENT as the Go wrapper hands off to ao.exe,
+	// immediately cancelling the daemon's signal context (exit 0xC000013A).
+	// The supervisor pipe already owns normal app-lifetime shutdown on Windows.
 	//
 	// AO_KEEP_DAEMON: the daemon must survive this app, so it cannot inherit
 	// Electron-owned stdout/stderr pipes — when Electron exits, the pipe read
@@ -863,7 +867,7 @@ async function startDaemonInner(startEpoch: number): Promise<DaemonStatus> {
 			cwd: launch.cwd,
 			env: daemonEnv(),
 			shell: launch.shell,
-			detached: true,
+			detached: !(process.platform === "win32" && launch.source === "dev"),
 			// Hide the daemon's console on a Windows GUI launch (no flashing terminal).
 			windowsHide: true,
 			stdio,
