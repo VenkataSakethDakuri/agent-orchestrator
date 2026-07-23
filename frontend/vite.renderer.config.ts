@@ -29,7 +29,19 @@ const CONTENT_SECURITY_POLICY = [
 	"style-src 'self' 'unsafe-inline'",
 	"img-src 'self' data:",
 	"font-src 'self' data:",
-	["connect-src", "'self'", "http://127.0.0.1:*", "ws://127.0.0.1:*", POSTHOG_ORIGIN].filter(Boolean).join(" "),
+	[
+		"connect-src",
+		"'self'",
+		"http://127.0.0.1:*",
+		"ws://127.0.0.1:*",
+		"https://*.proxy.daytona.work",
+		"wss://*.proxy.daytona.work",
+		"https://*.daytonaproxy01.net",
+		"wss://*.daytonaproxy01.net",
+		POSTHOG_ORIGIN,
+	]
+		.filter(Boolean)
+		.join(" "),
 	"object-src 'none'",
 	"base-uri 'self'",
 	"frame-src 'none'",

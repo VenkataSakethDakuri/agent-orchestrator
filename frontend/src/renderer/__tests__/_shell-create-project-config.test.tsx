@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { createProjectConfig } from "../routes/_shell";
+import { Route, createProjectConfig } from "../routes/_shell";
+
+describe("shell route loading", () => {
+	it("does not rebind the API client to the local daemon during Cloud child navigation", () => {
+		expect(Route.options.shouldReload).toBe(false);
+	});
+});
 
 describe("createProjectConfig", () => {
 	it("persists selected worker and orchestrator agents without tracker intake by default", () => {

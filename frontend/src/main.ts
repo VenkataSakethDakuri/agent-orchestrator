@@ -10,6 +10,7 @@ import {
 	nativeImage,
 	Notification as ElectronNotification,
 	protocol,
+	session,
 	shell,
 	WebContentsView,
 	webContents,
@@ -157,6 +158,12 @@ const TITLEBAR_HEIGHT = 36;
 const RENDERER_SCHEME = "app";
 const RENDERER_HOST = "renderer";
 const RENDERER_ORIGIN = `${RENDERER_SCHEME}://${RENDERER_HOST}`;
+const DAYTONA_PREVIEW_URL_PATTERNS = [
+	"https://*.proxy.daytona.work/*",
+	"wss://*.proxy.daytona.work/*",
+	"https://*.daytonaproxy01.net/*",
+	"wss://*.daytonaproxy01.net/*",
+];
 
 // The packaged renderer is served from a custom standard scheme, not file://.
 // A file:// page has the opaque "null" origin, which the daemon must never
@@ -1507,6 +1514,40 @@ app.whenReady().then(async () => {
 	} catch (err) {
 		console.error("failed to write app-state marker:", err);
 	}
+
+	session.defaultSession.webRequest.onBeforeSendHeaders(
+		{ urls: DAYTONA_PREVIEW_URL_PATTERNS },
+		(details, callback) => {
+			callback({
+				requestHeaders: {
+					...details.requestHeaders,
+					"X-Daytona-Skip-Preview-Warning": "true",
+				},
+			});
+		},
+	);
+
+	// Some Daytona preview domains forward AO's response but omit its CORS
+	// headers. The request succeeds in the sandbox (including POST 201), then
+	// Chromium surfaces only "Failed to fetch" because it cannot expose the
+	// response to the renderer. Restore the same narrow renderer origin AO would
+	// have returned; this interception applies only inside this Electron session.
+	const allowedRendererOrigin = MAIN_WINDOW_VITE_DEV_SERVER_URL
+		? new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL).origin
+		: RENDERER_ORIGIN;
+	session.defaultSession.webRequest.onHeadersReceived(
+		{ urls: DAYTONA_PREVIEW_URL_PATTERNS },
+		(details, callback) => {
+			const responseHeaders = { ...(details.responseHeaders ?? {}) };
+			for (const name of Object.keys(responseHeaders)) {
+				if (name.toLowerCase().startsWith("access-control-allow-")) delete responseHeaders[name];
+			}
+			responseHeaders["Access-Control-Allow-Origin"] = [allowedRendererOrigin];
+			responseHeaders["Access-Control-Allow-Methods"] = ["GET, POST, PATCH, PUT, DELETE, OPTIONS"];
+			responseHeaders["Access-Control-Allow-Headers"] = ["content-type"];
+			callback({ responseHeaders });
+		},
+	);
 
 	registerRendererProtocol();
 	applyRuntimeAppIcon();

@@ -40,6 +40,10 @@ export const Route = createFileRoute("/_shell")({
 		await refreshDaemonStatus().catch(() => undefined);
 		return context.queryClient.ensureQueryData(workspaceQueryOptions);
 	},
+	// The shell stays mounted while switching between Local and Cloud. Reloading
+	// this parent during Cloud navigation would bind the API client back to the
+	// local daemon and overwrite the signed Daytona URL.
+	shouldReload: false,
 	component: ShellLayout,
 });
 
