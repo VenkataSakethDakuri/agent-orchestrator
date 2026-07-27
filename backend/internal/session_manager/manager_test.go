@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/scratch"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
@@ -135,10 +136,19 @@ func (f *fakeStore) DeleteSessionWorktrees(_ context.Context, id domain.SessionI
 type fakeLCM struct {
 	store     *fakeStore
 	completed int
+	prepared  []string
+	cancelled []string
 	// terminated counts MarkTerminated calls per session id.
 	terminated map[domain.SessionID]int
 }
 
+func (l *fakeLCM) PrepareLaunch(id domain.SessionID, launchID string) error {
+	l.prepared = append(l.prepared, string(id)+":"+launchID)
+	return nil
+}
+func (l *fakeLCM) CancelLaunch(id domain.SessionID, launchID string) {
+	l.cancelled = append(l.cancelled, string(id)+":"+launchID)
+}
 func (l *fakeLCM) MarkSpawned(_ context.Context, id domain.SessionID, metadata domain.SessionMetadata) error {
 	l.completed++
 	rec := l.store.sessions[id]
@@ -172,6 +182,40 @@ type fakeRuntime struct {
 	aliveByHandle map[string]bool
 	aliveErr      error
 	destroyedIDs  []string
+}
+
+type fakeRestartRuntime struct {
+	*fakeRuntime
+	restarted     int
+	restartHandle ports.RuntimeHandle
+	restartErr    error
+	onRestart     func()
+}
+
+func (r *fakeRestartRuntime) Restart(_ context.Context, handle ports.RuntimeHandle, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
+	if r.onRestart != nil {
+		r.onRestart()
+	}
+	r.restarted++
+	r.restartHandle = handle
+	r.lastCfg = cfg
+	if r.restartErr != nil {
+		return ports.RuntimeHandle{}, r.restartErr
+	}
+	return handle, nil
+}
+
+type blockingRestartRuntime struct {
+	*fakeRuntime
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingRestartRuntime) Restart(_ context.Context, handle ports.RuntimeHandle, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
+	r.lastCfg = cfg
+	close(r.entered)
+	<-r.release
+	return handle, nil
 }
 
 func (r *fakeRuntime) Create(_ context.Context, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
@@ -243,6 +287,12 @@ func (a launchArgvAgent) GetRestoreCommand(context.Context, ports.RestoreConfig)
 	return a.argv, true, nil
 }
 
+type supervisedLaunchAgent struct{ launchArgvAgent }
+
+func (supervisedLaunchAgent) ExitDetectionMode() ports.AgentExitDetectionMode {
+	return ports.AgentExitDetectionSupervisor
+}
+
 // fakeAgents resolves every harness to the same fakeAgent.
 type fakeAgents struct{}
 
@@ -307,6 +357,71 @@ func (a promptStrategyErrorAgent) GetPromptDeliveryStrategy(context.Context, por
 type singleAgent struct{ agent ports.Agent }
 
 func (s singleAgent) Agent(domain.AgentHarness) (ports.Agent, bool) { return s.agent, true }
+
+type scratchHookAgent struct {
+	fakeAgent
+}
+
+func (a *scratchHookAgent) GetAgentHooks(_ context.Context, cfg ports.WorkspaceHookConfig) error {
+	dir := filepath.Join(cfg.WorkspacePath, ".claude")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "settings.local.json"), []byte("{}"), 0o600)
+}
+
+func (a *scratchHookAgent) GetLaunchCommand(context.Context, ports.LaunchConfig) ([]string, error) {
+	return []string{"missing-agent"}, nil
+}
+
+type scratchHookAfterStartAgent struct {
+	scratchHookAgent
+}
+
+func (a *scratchHookAfterStartAgent) GetLaunchCommand(context.Context, ports.LaunchConfig) ([]string, error) {
+	return []string{"agent"}, nil
+}
+
+func (a *scratchHookAfterStartAgent) GetPromptDeliveryStrategy(context.Context, ports.LaunchConfig) (ports.PromptDeliveryStrategy, error) {
+	return ports.PromptDeliveryAfterStart, nil
+}
+
+type nonEmptyWorkspace struct {
+	ports.Workspace
+}
+
+func (w *nonEmptyWorkspace) Create(ctx context.Context, cfg ports.WorkspaceConfig) (ports.WorkspaceInfo, error) {
+	info, err := w.Workspace.Create(ctx, cfg)
+	if err != nil {
+		return ports.WorkspaceInfo{}, err
+	}
+	if err := os.WriteFile(filepath.Join(info.Path, "provisioned.txt"), []byte("preserve"), 0o600); err != nil {
+		return ports.WorkspaceInfo{}, err
+	}
+	return info, nil
+}
+
+type maxSessionNumStore struct {
+	*fakeStore
+}
+
+func (s *maxSessionNumStore) CreateSession(_ context.Context, rec domain.SessionRecord) (domain.SessionRecord, error) {
+	next := 1
+	prefix := string(rec.ProjectID) + "-"
+	for id := range s.sessions {
+		if !strings.HasPrefix(string(id), prefix) {
+			continue
+		}
+		raw := strings.TrimPrefix(string(id), prefix)
+		var num int
+		if _, err := fmt.Sscanf(raw, "%d", &num); err == nil && num >= next {
+			next = num + 1
+		}
+	}
+	rec.ID = domain.SessionID(fmt.Sprintf("%s-%d", rec.ProjectID, next))
+	s.sessions[rec.ID] = rec
+	return rec, nil
+}
 
 type cleaningAgent struct {
 	fakeAgent
@@ -700,6 +815,226 @@ func TestSpawn_ResolvesProjectConfig(t *testing.T) {
 	}
 	if !agent.lastConfig.IsZero() {
 		t.Fatalf("launch config = %#v, want zero for project without config", agent.lastConfig)
+	}
+}
+
+func TestSpawn_WrapsSupervisedAgentAndPersistsGeneration(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	rt := &fakeRuntime{}
+	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "--model", "gpt-5"}}}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{}, Store: st,
+		Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath:    func(string) (string, error) { return "/bin/true", nil },
+		Executable:  func() (string, error) { return "/opt/ao", nil },
+		NewLaunchID: func() string { return "launch-7" },
+	})
+
+	rec, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantArgv := []string{"/opt/ao", "agent-process", "supervise", "--session", "mer-1", "--launch", "launch-7", "--", "codex", "--model", "gpt-5"}
+	if !reflect.DeepEqual(rt.lastCfg.Argv, wantArgv) {
+		t.Fatalf("runtime argv = %#v, want %#v", rt.lastCfg.Argv, wantArgv)
+	}
+	if got := rt.lastCfg.Env[EnvRuntimeLaunchID]; got != "launch-7" {
+		t.Fatalf("runtime launch env = %q, want launch-7", got)
+	}
+	if rec.Metadata.RuntimeLaunchID != "launch-7" {
+		t.Fatalf("stored launch id = %q, want launch-7", rec.Metadata.RuntimeLaunchID)
+	}
+}
+
+func TestRestore_RotatesSupervisedAgentGeneration(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "b", AgentSessionID: "agent-x", RuntimeLaunchID: "launch-old"})
+	rt := &fakeRuntime{}
+	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "resume", "agent-x"}}}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{}, Store: st,
+		Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath:    func(string) (string, error) { return "/bin/true", nil },
+		Executable:  func() (string, error) { return "/opt/ao", nil },
+		NewLaunchID: func() string { return "launch-new" },
+	})
+
+	result, err := m.RestoreWithMode(ctx, "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Session.Metadata.RuntimeLaunchID != "launch-new" {
+		t.Fatalf("restored launch id = %q, want launch-new", result.Session.Metadata.RuntimeLaunchID)
+	}
+	if got := rt.lastCfg.Env[EnvRuntimeLaunchID]; got != "launch-new" {
+		t.Fatalf("restored launch env = %q, want launch-new", got)
+	}
+	wantArgv := []string{"/opt/ao", "agent-process", "supervise", "--session", "mer-1", "--launch", "launch-new", "--", "codex", "resume", "agent-x"}
+	if !reflect.DeepEqual(rt.lastCfg.Argv, wantArgv) {
+		t.Fatalf("restored runtime argv = %#v, want %#v", rt.lastCfg.Argv, wantArgv)
+	}
+}
+
+func newExitedResumeManager(t *testing.T, runtime runtimeController, agent ports.Agent) (*Manager, *fakeStore, *fakeWorkspace) {
+	t.Helper()
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID:        "mer-1",
+		ProjectID: "mer",
+		Kind:      domain.KindWorker,
+		Harness:   domain.HarnessCodex,
+		Activity:  domain.Activity{State: domain.ActivityExited},
+		Metadata: domain.SessionMetadata{
+			WorkspacePath:   "/ws/mer-1",
+			Branch:          "ao/mer-1",
+			RuntimeHandleID: "tmux-mer-1",
+			RuntimeLaunchID: "launch-old",
+			AgentSessionID:  "agent-x",
+			Prompt:          "continue the task",
+		},
+	}
+	ws := &fakeWorkspace{}
+	m := New(Deps{
+		Runtime: runtime, Agents: singleAgent{agent: agent}, Workspace: ws, Store: st,
+		Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		DataDir:     t.TempDir(),
+		LookPath:    func(string) (string, error) { return "/bin/true", nil },
+		Executable:  func() (string, error) { return "/opt/ao", nil },
+		NewLaunchID: func() string { return "launch-new" },
+	})
+	return m, st, ws
+}
+
+func TestResumeAgent_RestartsRuntimeWithManagedGeneration(t *testing.T) {
+	baseRuntime := &fakeRuntime{aliveByHandle: map[string]bool{"tmux-mer-1": true}}
+	runtime := &fakeRestartRuntime{fakeRuntime: baseRuntime}
+	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "resume", "agent-x"}}}
+	m, st, ws := newExitedResumeManager(t, runtime, agent)
+	lcm := m.lcm.(*fakeLCM)
+	runtime.onRestart = func() {
+		if !reflect.DeepEqual(lcm.prepared, []string{"mer-1:launch-new"}) {
+			t.Fatalf("runtime restarted before lifecycle prepared generation: %v", lcm.prepared)
+		}
+	}
+
+	result, err := m.ResumeAgentWithMode(ctx, "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.restarted != 1 || runtime.restartHandle.ID != "tmux-mer-1" {
+		t.Fatalf("restart = %d handle=%+v", runtime.restarted, runtime.restartHandle)
+	}
+	if baseRuntime.created != 0 || baseRuntime.destroyed != 0 {
+		t.Fatalf("tmux restart should not recreate runtime: created=%d destroyed=%d", baseRuntime.created, baseRuntime.destroyed)
+	}
+	if ws.lastCfg.SessionID != "" || len(ws.calls) != 0 {
+		t.Fatalf("resume should not restore or recreate workspace: cfg=%+v calls=%v", ws.lastCfg, ws.calls)
+	}
+	wantArgv := []string{"/opt/ao", "agent-process", "supervise", "--session", "mer-1", "--launch", "launch-new", "--", "codex", "resume", "agent-x"}
+	if !reflect.DeepEqual(baseRuntime.lastCfg.Argv, wantArgv) {
+		t.Fatalf("resumed runtime argv = %#v, want %#v", baseRuntime.lastCfg.Argv, wantArgv)
+	}
+	if got := baseRuntime.lastCfg.Env[EnvRuntimeLaunchID]; got != "launch-new" {
+		t.Fatalf("runtime launch env = %q, want launch-new", got)
+	}
+	got := st.sessions["mer-1"]
+	if got.IsTerminated || got.Activity.State != domain.ActivityIdle {
+		t.Fatalf("resumed session = %+v, want live idle", got)
+	}
+	if got.Metadata.RuntimeHandleID != "tmux-mer-1" || got.Metadata.RuntimeLaunchID != "launch-new" {
+		t.Fatalf("resumed metadata = %+v", got.Metadata)
+	}
+	if result.Mode != RestoreModeNative {
+		t.Fatalf("resume mode = %q, want native", result.Mode)
+	}
+	if !reflect.DeepEqual(lcm.cancelled, []string{"mer-1:launch-new"}) {
+		t.Fatalf("launch cleanup = %v, want new generation released", lcm.cancelled)
+	}
+}
+
+func TestResumeAgent_FallsBackToRuntimeRecreateWithoutRestartCapability(t *testing.T) {
+	runtime := &fakeRuntime{aliveByHandle: map[string]bool{"tmux-mer-1": true}}
+	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "resume", "agent-x"}}}
+	m, st, _ := newExitedResumeManager(t, runtime, agent)
+
+	if _, err := m.ResumeAgentWithMode(ctx, "mer-1"); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.destroyed != 1 || runtime.created != 1 || !reflect.DeepEqual(runtime.destroyedIDs, []string{"tmux-mer-1"}) {
+		t.Fatalf("fallback runtime lifecycle: created=%d destroyed=%d ids=%v", runtime.created, runtime.destroyed, runtime.destroyedIDs)
+	}
+	if got := st.sessions["mer-1"].Metadata.RuntimeHandleID; got != "h1" {
+		t.Fatalf("fallback runtime handle = %q, want h1", got)
+	}
+}
+
+func TestResumeAgent_RequiresLiveExitedSession(t *testing.T) {
+	runtime := &fakeRuntime{aliveByHandle: map[string]bool{"tmux-mer-1": true}}
+	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "resume", "agent-x"}}}
+	m, st, _ := newExitedResumeManager(t, runtime, agent)
+
+	rec := st.sessions["mer-1"]
+	rec.Activity.State = domain.ActivityIdle
+	st.sessions["mer-1"] = rec
+	if _, err := m.ResumeAgentWithMode(ctx, "mer-1"); !errors.Is(err, ErrAgentNotExited) {
+		t.Fatalf("idle resume error = %v, want ErrAgentNotExited", err)
+	}
+
+	rec.Activity.State = domain.ActivityExited
+	rec.IsTerminated = true
+	st.sessions["mer-1"] = rec
+	if _, err := m.ResumeAgentWithMode(ctx, "mer-1"); !errors.Is(err, ErrTerminated) {
+		t.Fatalf("terminated resume error = %v, want ErrTerminated", err)
+	}
+	if runtime.created != 0 || runtime.destroyed != 0 {
+		t.Fatalf("invalid resume touched runtime: created=%d destroyed=%d", runtime.created, runtime.destroyed)
+	}
+}
+
+func TestResumeAgent_RestartFailureLeavesSessionExited(t *testing.T) {
+	baseRuntime := &fakeRuntime{aliveByHandle: map[string]bool{"tmux-mer-1": true}}
+	runtime := &fakeRestartRuntime{fakeRuntime: baseRuntime, restartErr: errors.New("respawn failed")}
+	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "resume", "agent-x"}}}
+	m, st, _ := newExitedResumeManager(t, runtime, agent)
+	lcm := m.lcm.(*fakeLCM)
+
+	if _, err := m.ResumeAgentWithMode(ctx, "mer-1"); err == nil || !strings.Contains(err.Error(), "respawn failed") {
+		t.Fatalf("resume error = %v", err)
+	}
+	got := st.sessions["mer-1"]
+	if got.IsTerminated || got.Activity.State != domain.ActivityExited || got.Metadata.RuntimeLaunchID != "launch-old" {
+		t.Fatalf("failed resume changed session: %+v", got)
+	}
+	if !reflect.DeepEqual(lcm.cancelled, []string{"mer-1:launch-new"}) {
+		t.Fatalf("failed launch cleanup = %v, want waiting hooks released", lcm.cancelled)
+	}
+}
+
+func TestResumeAgent_RejectsConcurrentRequest(t *testing.T) {
+	baseRuntime := &fakeRuntime{aliveByHandle: map[string]bool{"tmux-mer-1": true}}
+	runtime := &blockingRestartRuntime{
+		fakeRuntime: baseRuntime,
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	agent := supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex", "resume", "agent-x"}}}
+	m, _, _ := newExitedResumeManager(t, runtime, agent)
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := m.ResumeAgentWithMode(ctx, "mer-1")
+		firstDone <- err
+	}()
+	<-runtime.entered
+
+	if _, err := m.ResumeAgentWithMode(ctx, "mer-1"); !errors.Is(err, ErrResumeInProgress) {
+		t.Fatalf("concurrent resume error = %v, want ErrResumeInProgress", err)
+	}
+	close(runtime.release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first resume: %v", err)
 	}
 }
 
@@ -3102,6 +3437,162 @@ func TestSpawn_RejectsMissingAgentBinary(t *testing.T) {
 	requireNoPromptDir(t, dataDir, "mer-1")
 }
 
+func TestSpawn_MissingBinaryPreservesNonEmptyScratchWorkspaceForRetry(t *testing.T) {
+	st := newFakeStore()
+	st.projects["scratch"] = domain.ProjectRecord{
+		ID:     "scratch",
+		Kind:   domain.ProjectKindScratch,
+		Config: testRoleAgents(),
+	}
+	store := &maxSessionNumStore{fakeStore: st}
+	workspace, err := scratch.New(scratch.Options{ManagedRoot: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notFound := func(name string) (string, error) {
+		if name == "tmux" {
+			return "/bin/tmux", nil
+		}
+		return "", fmt.Errorf("exec: %q: not found", name)
+	}
+	m := New(Deps{
+		Runtime:   &fakeRuntime{},
+		Agents:    singleAgent{agent: &scratchHookAgent{}},
+		Workspace: workspace,
+		Store:     store,
+		Messenger: &fakeMessenger{},
+		Lifecycle: &fakeLCM{store: st},
+		DataDir:   t.TempDir(),
+		LookPath:  notFound,
+	})
+
+	_, _, _, err = m.Spawn(ctx, ports.SpawnConfig{ProjectID: "scratch", Kind: domain.KindOrchestrator})
+	if !errors.Is(err, ports.ErrAgentBinaryNotFound) {
+		t.Fatalf("first spawn err = %v, want ErrAgentBinaryNotFound", err)
+	}
+	failed, ok := st.sessions["scratch-1"]
+	if !ok {
+		t.Fatal("failed scratch spawn row was deleted")
+	}
+	if !failed.IsTerminated {
+		t.Fatal("failed scratch spawn row must be terminated")
+	}
+	if failed.Metadata.WorkspacePath == "" {
+		t.Fatal("failed scratch spawn must retain its preserved workspace path")
+	}
+	if _, err := os.Stat(filepath.Join(failed.Metadata.WorkspacePath, ".claude", "settings.local.json")); err != nil {
+		t.Fatalf("preserved hook file: %v", err)
+	}
+
+	_, _, _, err = m.Spawn(ctx, ports.SpawnConfig{ProjectID: "scratch", Kind: domain.KindOrchestrator})
+	if !errors.Is(err, ports.ErrAgentBinaryNotFound) {
+		t.Fatalf("retry err = %v, want ErrAgentBinaryNotFound", err)
+	}
+	if errors.Is(err, ports.ErrWorkspaceDirty) {
+		t.Fatalf("retry reused preserved workspace: %v", err)
+	}
+	if _, ok := st.sessions["scratch-2"]; !ok {
+		t.Fatal("retry did not allocate a fresh scratch session")
+	}
+}
+
+func TestSpawn_EarlyFailurePreservesNonEmptyScratchWorkspace(t *testing.T) {
+	st := newFakeStore()
+	config := testRoleAgents()
+	config.Symlinks = []string{"../invalid"}
+	st.projects["scratch"] = domain.ProjectRecord{
+		ID:     "scratch",
+		Kind:   domain.ProjectKindScratch,
+		Config: config,
+	}
+	store := &maxSessionNumStore{fakeStore: st}
+	baseWorkspace, err := scratch.New(scratch.Options{ManagedRoot: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := &nonEmptyWorkspace{Workspace: baseWorkspace}
+	m := New(Deps{
+		Runtime:   &fakeRuntime{},
+		Agents:    fakeAgents{},
+		Workspace: workspace,
+		Store:     store,
+		Messenger: &fakeMessenger{},
+		Lifecycle: &fakeLCM{store: st},
+		DataDir:   t.TempDir(),
+	})
+
+	_, _, _, err = m.Spawn(ctx, ports.SpawnConfig{ProjectID: "scratch", Kind: domain.KindOrchestrator})
+	if err == nil || !strings.Contains(err.Error(), "provision") {
+		t.Fatalf("Spawn err = %v, want provisioning failure", err)
+	}
+	failed, ok := st.sessions["scratch-1"]
+	if !ok {
+		t.Fatal("failed early scratch spawn row was deleted")
+	}
+	if !failed.IsTerminated {
+		t.Fatal("failed early scratch spawn row must be terminated")
+	}
+	if failed.Metadata.WorkspacePath == "" {
+		t.Fatal("failed early scratch spawn must retain its preserved workspace path")
+	}
+	if _, err := os.Stat(filepath.Join(failed.Metadata.WorkspacePath, "provisioned.txt")); err != nil {
+		t.Fatalf("preserved workspace file: %v", err)
+	}
+}
+
+func TestSpawn_AfterStartFailurePreservesNonEmptyScratchWorkspace(t *testing.T) {
+	st := newFakeStore()
+	st.projects["scratch"] = domain.ProjectRecord{
+		ID:     "scratch",
+		Kind:   domain.ProjectKindScratch,
+		Config: testRoleAgents(),
+	}
+	store := &maxSessionNumStore{fakeStore: st}
+	workspace, err := scratch.New(scratch.Options{ManagedRoot: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeRuntime{}
+	m := New(Deps{
+		Runtime:   runtime,
+		Agents:    singleAgent{agent: &scratchHookAfterStartAgent{}},
+		Workspace: workspace,
+		Store:     store,
+		Messenger: &fakeMessenger{err: errors.New("pane unavailable")},
+		Lifecycle: &fakeLCM{store: st},
+		DataDir:   t.TempDir(),
+		LookPath:  func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	_, _, _, err = m.Spawn(ctx, ports.SpawnConfig{
+		ProjectID: "scratch",
+		Kind:      domain.KindOrchestrator,
+		Prompt:    "continue",
+	})
+	if err == nil || !strings.Contains(err.Error(), "deliver prompt") {
+		t.Fatalf("Spawn err = %v, want prompt delivery failure", err)
+	}
+	failed, ok := st.sessions["scratch-1"]
+	if !ok {
+		t.Fatal("failed after-start scratch spawn row was deleted")
+	}
+	if !failed.IsTerminated {
+		t.Fatal("failed after-start scratch spawn row must be terminated")
+	}
+	if failed.Metadata.WorkspacePath == "" {
+		t.Fatal("failed after-start scratch spawn must retain its preserved workspace path")
+	}
+	if failed.Metadata.RuntimeHandleID != "" || failed.Metadata.RuntimeLaunchID != "" {
+		t.Fatalf("destroyed runtime metadata was retained: %#v", failed.Metadata)
+	}
+	if runtime.created != 1 || runtime.destroyed != 1 {
+		t.Fatalf("runtime created=%d destroyed=%d, want 1/1", runtime.created, runtime.destroyed)
+	}
+	if _, err := os.Stat(filepath.Join(failed.Metadata.WorkspacePath, ".claude", "settings.local.json")); err != nil {
+		t.Fatalf("preserved hook file: %v", err)
+	}
+}
+
 func TestSpawn_ValidatesBinaryAfterEnvPrefix(t *testing.T) {
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
@@ -5069,6 +5560,22 @@ func TestSend_BlockedSessionRejectsDelivery(t *testing.T) {
 	}
 	if len(msg.msgs) != 0 {
 		t.Fatalf("Send calls = %d, want 0 (no paste into a pending decision)", len(msg.msgs))
+	}
+}
+
+func TestSend_ExitedAgentRejectsDelivery(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["s1"] = domain.SessionRecord{ID: "s1", Harness: "claude-code",
+		Activity: domain.Activity{State: domain.ActivityExited}}
+	msg := &fakeMessenger{}
+	m := newSendTestManager(t, signalingAgent{}, msg, st)
+
+	err := m.Send(context.Background(), "s1", "status update please")
+	if !errors.Is(err, ErrAgentExited) {
+		t.Fatalf("Send error = %v, want ErrAgentExited", err)
+	}
+	if len(msg.msgs) != 0 {
+		t.Fatalf("Send calls = %d, want 0 (no paste into an exited agent shell)", len(msg.msgs))
 	}
 }
 
