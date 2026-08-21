@@ -51,6 +51,7 @@ func (s *Store) UpdateSessionFromActivitySignal(ctx context.Context, rec domain.
 		ActivityLastAt:               activity.LastActivityAt,
 		FirstSignalAt:                timeToNullTime(rec.FirstSignalAt),
 		AgentSessionID:               rec.Metadata.AgentSessionID,
+		AgentSessionIDLaunchID:       rec.Metadata.AgentSessionIDLaunchID,
 		LatestUserPrompt:             rec.Metadata.LatestUserPrompt,
 		LatestAssistantUpdate:        rec.Metadata.LatestAssistantUpdate,
 		NativeTranscriptPath:         rec.Metadata.NativeTranscriptPath,
@@ -222,6 +223,21 @@ func (s *Store) SetSessionReviewerHarness(ctx context.Context, id domain.Session
 	return rows > 0, nil
 }
 
+// SetSessionAutoReview persists the daemon-side review automation toggle.
+func (s *Store) SetSessionAutoReview(ctx context.Context, id domain.SessionID, enabled bool, updatedAt time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.SetSessionAutoReview(ctx, gen.SetSessionAutoReviewParams{
+		AutoReviewEnabled: enabled,
+		UpdatedAt:         updatedAt,
+		ID:                id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("set auto review for %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
 // DeleteSession removes a session row, but only if it is still in seed state
 // (no workspace, no runtime handle, no agent session id, no prompt, no handoff
 // metadata, and not already terminated). Rows that have observable spawn output are immutable
@@ -347,14 +363,15 @@ func mapListAllSessionsRows(rows []gen.ListAllSessionsRow) []domain.SessionRecor
 
 func rowToRecord(row gen.GetSessionRow) domain.SessionRecord {
 	return domain.SessionRecord{
-		ID:              row.ID,
-		ProjectID:       row.ProjectID,
-		IssueID:         row.IssueID,
-		Kind:            row.Kind,
-		Harness:         row.Harness,
-		ReviewerHarness: row.ReviewerHarness,
-		DisplayName:     row.DisplayName,
-		Mode:            domain.NormalizeSessionMode(row.SessionMode),
+		ID:                row.ID,
+		ProjectID:         row.ProjectID,
+		IssueID:           row.IssueID,
+		Kind:              row.Kind,
+		Harness:           row.Harness,
+		ReviewerHarness:   row.ReviewerHarness,
+		AutoReviewEnabled: row.AutoReviewEnabled,
+		DisplayName:       row.DisplayName,
+		Mode:              domain.NormalizeSessionMode(row.SessionMode),
 		Activity: domain.Activity{
 			State:          row.ActivityState,
 			LastActivityAt: row.ActivityLastAt,
@@ -375,6 +392,7 @@ func rowToRecord(row gen.GetSessionRow) domain.SessionRecord {
 			RuntimeHandleID:           row.RuntimeHandleID,
 			RuntimeLaunchID:           row.RuntimeLaunchID,
 			AgentSessionID:            row.AgentSessionID,
+			AgentSessionIDLaunchID:    row.AgentSessionIDLaunchID,
 			Prompt:                    row.Prompt,
 			LatestUserPrompt:          row.LatestUserPrompt,
 			LatestAssistantUpdate:     row.LatestAssistantUpdate,
@@ -384,6 +402,7 @@ func rowToRecord(row gen.GetSessionRow) domain.SessionRecord {
 			BrowserCapabilityVerifier: row.BrowserCapabilityVerifier,
 			ProviderConversationID:    row.ProviderConversationID,
 			ControllerGeneration:      row.ControllerGeneration,
+			Model:                     row.Model,
 		},
 		CleanupGeneration: row.CleanupGeneration,
 		CreatedAt:         row.CreatedAt,
@@ -413,6 +432,7 @@ func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams
 		Kind:                      rec.Kind,
 		Harness:                   rec.Harness,
 		ReviewerHarness:           rec.ReviewerHarness,
+		AutoReviewEnabled:         rec.AutoReviewEnabled,
 		DisplayName:               rec.DisplayName,
 		ActivityState:             activity.State,
 		ActivityLastAt:            activity.LastActivityAt,
@@ -428,6 +448,7 @@ func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams
 		RuntimeHandleID:           rec.Metadata.RuntimeHandleID,
 		RuntimeLaunchID:           rec.Metadata.RuntimeLaunchID,
 		AgentSessionID:            rec.Metadata.AgentSessionID,
+		AgentSessionIDLaunchID:    rec.Metadata.AgentSessionIDLaunchID,
 		Prompt:                    rec.Metadata.Prompt,
 		LatestUserPrompt:          rec.Metadata.LatestUserPrompt,
 		LatestAssistantUpdate:     rec.Metadata.LatestAssistantUpdate,
@@ -442,6 +463,7 @@ func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams
 		SessionMode:               domain.NormalizeSessionMode(rec.Mode),
 		ProviderConversationID:    rec.Metadata.ProviderConversationID,
 		ControllerGeneration:      rec.Metadata.ControllerGeneration,
+		Model:                     rec.Metadata.Model,
 		CreatedAt:                 rec.CreatedAt,
 		UpdatedAt:                 rec.UpdatedAt,
 	}
@@ -455,6 +477,7 @@ func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 		Kind:                      rec.Kind,
 		Harness:                   rec.Harness,
 		ReviewerHarness:           rec.ReviewerHarness,
+		AutoReviewEnabled:         rec.AutoReviewEnabled,
 		DisplayName:               rec.DisplayName,
 		ActivityState:             activity.State,
 		ActivityLastAt:            activity.LastActivityAt,
@@ -470,6 +493,7 @@ func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 		RuntimeHandleID:           rec.Metadata.RuntimeHandleID,
 		RuntimeLaunchID:           rec.Metadata.RuntimeLaunchID,
 		AgentSessionID:            rec.Metadata.AgentSessionID,
+		AgentSessionIDLaunchID:    rec.Metadata.AgentSessionIDLaunchID,
 		Prompt:                    rec.Metadata.Prompt,
 		LatestUserPrompt:          rec.Metadata.LatestUserPrompt,
 		LatestAssistantUpdate:     rec.Metadata.LatestAssistantUpdate,
@@ -483,6 +507,7 @@ func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 		BrowserCapabilityVerifier: rec.Metadata.BrowserCapabilityVerifier,
 		ProviderConversationID:    rec.Metadata.ProviderConversationID,
 		ControllerGeneration:      rec.Metadata.ControllerGeneration,
+		Model:                     rec.Metadata.Model,
 		UpdatedAt:                 rec.UpdatedAt,
 	}
 }
